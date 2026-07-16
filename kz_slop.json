@@ -1,0 +1,72 @@
+{
+    "formatVersion": 1,
+    "dataTimestamp": 1784183285,
+    "tracks": {
+        "main": {
+            "zones": {
+                "segments": [{
+                        "limitStartGroundSpeed": true,
+                        "checkpointsRequired": true,
+                        "checkpointsOrdered": true,
+                        "checkpoints": [{
+                                "regions": [{
+                                        "points": [[-288.0, -288.0], [288.0, -288.0], [288.0, 288.0], [-288.0, 288.0]],
+                                        "bottom": 0.0,
+                                        "height": 160.0,
+                                        "teleDestTargetname": "rd_s1",
+                                        "safeHeight": 0.0
+                                    }]
+                            }]
+                    }, {
+                        "limitStartGroundSpeed": true,
+                        "checkpointsRequired": true,
+                        "checkpointsOrdered": true,
+                        "checkpoints": [{
+                                "regions": [{
+                                        "points": [[3370.0, -288.0], [3946.0, -288.0], [3946.0, 288.0], [3370.0, 288.0]],
+                                        "bottom": 280.0,
+                                        "height": 160.0,
+                                        "teleDestTargetname": "rd_s2",
+                                        "safeHeight": 0.0
+                                    }]
+                            }]
+                    }, {
+                        "limitStartGroundSpeed": true,
+                        "checkpointsRequired": true,
+                        "checkpointsOrdered": true,
+                        "checkpoints": [{
+                                "regions": [{
+                                        "points": [[5680.0, -288.0], [6256.0, -288.0], [6256.0, 288.0], [5680.0, 288.0]],
+                                        "bottom": 700.0,
+                                        "height": 160.0,
+                                        "teleDestTargetname": "rd_s3",
+                                        "safeHeight": 0.0
+                                    }]
+                            }]
+                    }, {
+                        "limitStartGroundSpeed": true,
+                        "checkpointsRequired": true,
+                        "checkpointsOrdered": true,
+                        "checkpoints": [{
+                                "regions": [{
+                                        "points": [[5680.0, 2428.0], [6256.0, 2428.0], [6256.0, 3004.0], [5680.0, 3004.0]],
+                                        "bottom": 1020.0,
+                                        "height": 160.0,
+                                        "teleDestTargetname": "rd_s4",
+                                        "safeHeight": 0.0
+                                    }]
+                            }]
+                    }],
+                "end": {
+                    "regions": [{
+                            "points": [[8272.0, 2428.0], [8848.0, 2428.0], [8848.0, 3004.0], [8272.0, 3004.0]],
+                            "bottom": 1380.0,
+                            "height": 200.0
+                        }]
+                }
+            },
+            "stagesEndAtStageStarts": true,
+            "bhopEnabled": false
+        }
+    }
+}
