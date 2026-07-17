@@ -51,10 +51,16 @@ ${verts}\t\t\t"material" "${material}"
 ${opts.disp ? opts.disp + "\n" : ""}\t\t}`;
 }
 
+// Every box is also recorded for the web viewer (docs/), which renders the
+// same geometry with three.js. Terrain tiles are skipped (the viewer rebuilds
+// terrain from the heightfield) and TOOLS/* boxes are filtered on export.
+const boxRecords = [];
+
 // Axis-aligned box solid. Plane points are clockwise viewed from outside.
 function solid(x1, y1, z1, x2, y2, z2, mats, opts = {}) {
   if (typeof mats === "string") mats = { all: mats };
   const m = (f) => mats[f] || mats.all || M.cliffB;
+  if (!opts.topOpts) boxRecords.push([x1, y1, z1, x2, y2, z2, m("top"), m("east")]);
   const vp = opts.withVerts
     ? {
         top: [`${x1} ${y2} ${z2}`, `${x2} ${y2} ${z2}`, `${x2} ${y1} ${z2}`, `${x1} ${y1} ${z2}`],
@@ -104,74 +110,151 @@ ${kv ? kv + "\n" : ""}${solids.join("\n")}
 }`);
 }
 
+// ---------- movement model (Momentum Mod climb mode) ----------
+// Numbers from docs.momentum-mod.org: jump apex 57u (66 crouched), run speed
+// 250 u/s, prestrafe tops out ~275 u/s, KZT bhop speed cap 380 u/s, g = 800.
+// v2 tuned gaps by feel and ignored landing height — a +48 rise cuts airtime
+// from 0.755s to 0.53s, which made stages 3/4 physically impossible. Every
+// gap is now derived from this model.
+const GRAV = 800;
+const VJUMP = Math.sqrt(2 * GRAV * 57); // ~302 u/s vertical takeoff speed
+// Airtime when landing dz units higher than takeoff (dz < 0 = drop).
+const airTime = (dz) => (VJUMP + Math.sqrt(VJUMP * VJUMP - 2 * GRAV * dz)) / GRAV;
+// Widest clearable gap at a given air speed: horizontal travel plus the 32u
+// the player's bbox overhangs the takeoff and landing edges (16u each side).
+const maxGap = (speed, dz) => speed * airTime(dz) + 32;
+// A gap that uses `frac` of what's clearable at the assumed speed.
+function gapFor(speed, dz, frac) {
+  if (frac > 0.88) throw new Error(`frac ${frac} leaves no margin`);
+  return Math.round(frac * maxGap(speed, dz));
+}
+
 // ---------- course layout ----------
 // The course is generated first (pure data); the terrain function is then
 // shaped around the resulting plaza positions.
 
 const PLAZA_R = 320; // flat plateau half-size
 const plazas = []; // {x, y, z}
-const platforms = []; // {cx, cy, size, top, thick, topMat, sideMat}
+const platforms = []; // {cx, cy, sx, sy, top, thick, topMat, sideMat}
+const report = []; // per-jump difficulty report, printed at the end
 
 function buildCourse() {
   // Start plaza
   plazas.push({ x: 0, y: 0, z: 0 });
 
   // Each section: walk `cursor` from the previous plaza's edge along `dir`.
-  // items: [gap, size, perpOffset, riseTo]
-  function section(from, dir, items, finalGap, plazaZ, mats) {
+  // items: {gap, size (across), len (along, defaults size), off, top, dz, speed}
+  function section(name, from, dir, items, finalGap, plazaRise, mats) {
     let cx = from.x + dir[0] * PLAZA_R;
     let cy = from.y + dir[1] * PLAZA_R;
-    for (const [gap, size, off, top] of items) {
-      cx += dir[0] * gap; cy += dir[1] * gap;
-      const pcx = cx + dir[0] * (size / 2) + (dir[1] !== 0 ? off : 0);
-      const pcy = cy + dir[1] * (size / 2) + (dir[0] !== 0 ? off : 0);
-      platforms.push({ cx: pcx, cy: pcy, size, top, thick: mats.thick, topMat: mats.top, sideMat: mats.side });
-      cx += dir[0] * size; cy += dir[1] * size;
+    let prevTop = from.z, prevOff = 0, prevSize = PLAZA_R * 2;
+    for (const it of items) {
+      cx += dir[0] * it.gap; cy += dir[1] * it.gap;
+      const along = it.len || it.size;
+      const pcx = cx + dir[0] * (along / 2) + (dir[1] !== 0 ? it.off : 0);
+      const pcy = cy + dir[1] * (along / 2) + (dir[0] !== 0 ? it.off : 0);
+      platforms.push({
+        cx: pcx, cy: pcy,
+        sx: dir[0] !== 0 ? along : it.size, sy: dir[0] !== 0 ? it.size : along,
+        top: it.top, thick: mats.thick, topMat: mats.topMat, sideMat: mats.sideMat,
+      });
+      const dz = it.top - prevTop;
+      // true jump length includes the lateral zigzag component
+      const lat = Math.max(0, Math.abs(it.off - prevOff) - (it.size + prevSize) / 2);
+      const eff = Math.round(Math.hypot(it.gap, lat));
+      const need = (eff - 32) / airTime(dz); // avg air speed required
+      report.push(`${name}  gap=${String(it.gap).padStart(3)}  eff=${String(eff).padStart(3)}` +
+        `  dz=${String(dz).padStart(3)}  need ${need.toFixed(0)} u/s of ${it.speed} assumed` +
+        ` (${(100 * need / it.speed).toFixed(0)}%)`);
+      if (eff > 0.88 * maxGap(it.speed, dz))
+        throw new Error(`${name}: effective gap ${eff} exceeds 88% of clearable at ${it.speed} u/s`);
+      prevTop = it.top; prevOff = it.off; prevSize = it.size;
+      cx += dir[0] * along; cy += dir[1] * along;
     }
-    const px = cx + dir[0] * (finalGap + PLAZA_R);
-    const py = cy + dir[1] * (finalGap + PLAZA_R);
-    const plaza = { x: px, y: py, z: plazaZ };
+    const plaza = {
+      x: cx + dir[0] * (finalGap + PLAZA_R),
+      y: cy + dir[1] * (finalGap + PLAZA_R),
+      z: prevTop + plazaRise,
+    };
+    const need = (finalGap - 32) / airTime(plazaRise);
+    report.push(`${name}  gap=${String(finalGap).padStart(3)}  dz=${String(plazaRise).padStart(3)}` +
+      `  need ${need.toFixed(0)} u/s (final jump onto plaza)`);
     plazas.push(plaza);
     return plaza;
   }
 
-  // Stage 1: Foothills bhop (z 0 -> 280). Gaps 96->160, gentle rises.
-  const s1 = [];
-  const gaps1 = [96, 104, 112, 118, 124, 130, 136, 142, 148, 152, 156, 160];
-  const sizes1 = [128, 128, 120, 120, 112, 112, 104, 104, 96, 96, 96, 96];
-  const offs1 = [0, 96, -96, 64, -64, 96, 0, -96, 64, -64, 96, 0];
-  for (let i = 0; i < 12; i++) s1.push([gaps1[i], sizes1[i], offs1[i], 20 * (i + 1)]);
-  const p2 = section(plazas[0], [1, 0], s1, 128, 280, { top: M.grassTop, side: M.cliffB, thick: 48 });
+  // Stage 1 — foothills bhop: 12 hops with dips for speed play. Speed builds
+  // down the chain (auto-bhop), so gaps grow from ~50% to ~66% of clearable.
+  let z = 0;
+  const dz1 = [-24, 16, -16, 20, 24, -24, 20, 24, -16, 24, 28, 24];
+  const size1 = [128, 128, 120, 120, 112, 112, 104, 104, 96, 96, 96, 96];
+  const off1 = [0, 64, -64, 56, -56, 64, -32, -80, 56, -56, 72, 0];
+  const s1 = dz1.map((dz, i) => {
+    const speed = Math.min(345, 280 + 14 * i);
+    z += dz;
+    return { gap: gapFor(speed, dz, 0.5 + 0.015 * i), size: size1[i], off: off1[i], top: z, dz, speed };
+  });
+  const p2 = section("S1 bhop ", plazas[0], [1, 0], s1, 140, 20,
+    { topMat: M.grassTop, sideMat: M.cliffB, thick: 48 });
 
-  // Stage 2: Cliff climb (z 280 -> 700). Ledges +48 each.
-  const s2 = [];
-  const gaps2 = [88, 92, 96, 100, 104, 106, 108, 112];
-  const offs2 = [80, -80, 64, -64, 80, -80, 0, 80];
-  for (let i = 0; i < 8; i++) s2.push([gaps2[i], 96, offs2[i], 280 + 48 * (i + 1)]);
-  const p3 = section(p2, [1, 0], s2, 96, 700, { top: M.dirtTop, side: M.cliffB, thick: 64 });
+  // Stage 2 — cliff climb: +48 ledges hopped from near-standstill (assume run
+  // speed 250, little room to prestrafe). Ledge #4 is a +56 crouch-jump.
+  z = p2.z;
+  const off2 = [48, -48, 40, -40, 48, -48, 32, -32, 48, 0];
+  const s2 = off2.map((off, i) => {
+    const crouch = i === 3;
+    const dz = crouch ? 56 : 48;
+    z += dz;
+    return {
+      gap: crouch ? 56 : gapFor(250, dz, 0.55 + 0.016 * i),
+      size: 96, off, top: z, dz, speed: 250,
+    };
+  });
+  const p3 = section("S2 climb", p2, [1, 0], s2, 96, 32,
+    { topMat: M.dirtTop, sideMat: M.cliffB, thick: 64 });
 
-  // Stage 3: Ridge pillars, turning north (z 700 -> 1020). Long gaps, narrow tops.
-  const s3 = [];
-  const gaps3 = [160, 168, 176, 184, 192, 196, 200];
-  const sizes3 = [96, 96, 88, 88, 80, 80, 72];
-  const offs3 = [0, 80, -80, 64, -64, 80, 0];
-  for (let i = 0; i < 7; i++) s3.push([gaps3[i], sizes3[i], offs3[i], 700 + 40 * (i + 1)]);
-  const p4 = section(p3, [0, 1], s3, 200, 1020, { top: M.rockTop, side: M.cliffA, thick: 400 });
+  // Stage 3 — ridge pillars, turning north: narrow tops, +32 rises. Assumes
+  // modest bhop chaining (285 -> 320 u/s), gaps 62% -> 72% of clearable.
+  z = p3.z;
+  const size3 = [96, 96, 88, 88, 80, 80, 72, 72];
+  const off3 = [0, 56, -56, 48, -48, 56, -48, 0];
+  const s3 = size3.map((size, i) => {
+    const speed = Math.min(320, 285 + 8 * i);
+    z += 32;
+    return { gap: gapFor(speed, 32, 0.62 + 0.014 * i), size, off: off3[i], top: z, dz: 32, speed };
+  });
+  const p4 = section("S3 ridge", p3, [0, 1], s3, 160, 32,
+    { topMat: M.rockTop, sideMat: M.cliffA, thick: 400 });
 
-  // Stage 4: Peak longjumps (z 1020 -> 1380). The spicy finale.
-  const s4 = [];
-  const gaps4 = [192, 200, 208, 212, 216];
-  const sizes4 = [160, 144, 144, 128, 128];
-  const offs4 = [0, 64, -64, 48, 0];
-  for (let i = 0; i < 5; i++) s4.push([gaps4[i], sizes4[i], offs4[i], 1020 + 48 * (i + 1)]);
-  section(p4, [1, 0], s4, 220, 1380, { top: M.rockTop, side: M.cliffB, thick: 64 });
+  // Stage 4 — peak longjumps: the spicy finale. Long rectangular runways
+  // (192u along travel) so each jump gets a fresh prestrafe; rises shrink to
+  // zero as gaps grow to 85% of clearable. Final jump: 204u gap, flat.
+  z = p4.z;
+  const dz4 = [16, 12, 8, 8];
+  const frac4 = [0.74, 0.77, 0.8, 0.83];
+  const s4 = dz4.map((dz, i) => {
+    z += dz;
+    return { gap: gapFor(275, dz, frac4[i]), size: 160, len: 192, off: [0, 64, -64, 48][i], top: z, dz, speed: 275 };
+  });
+  section("S4 peak ", p4, [1, 0], s4, gapFor(275, 0, 0.85), 0,
+    { topMat: M.rockTop, sideMat: M.cliffB, thick: 64 });
 }
 buildCourse();
 
 // ---------- terrain ----------
 const TILE = 512, POWER = 3, NV = 9; // 9x9 verts per tile
-const BASE_Z = -256; // displacement base plane
-const TX0 = -1024, TX1 = 9216, TY0 = -2048, TY1 = 4096;
+const BASE_Z = -448; // displacement base plane
+
+// Bounds follow the course, padded so the mountain falls away on all sides.
+const PADDING = 1792;
+let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+for (const p of plazas) {
+  bx0 = Math.min(bx0, p.x - PLAZA_R); bx1 = Math.max(bx1, p.x + PLAZA_R);
+  by0 = Math.min(by0, p.y - PLAZA_R); by1 = Math.max(by1, p.y + PLAZA_R);
+}
+const snap = (v, up) => (up ? Math.ceil(v / TILE) : Math.floor(v / TILE)) * TILE;
+const TX0 = snap(bx0 - PADDING, false), TX1 = snap(bx1 + PADDING, true);
+const TY0 = snap(by0 - PADDING, false), TY1 = snap(by1 + PADDING, true);
 
 const segs = [];
 for (let i = 0; i < plazas.length - 1; i++) segs.push([plazas[i], plazas[i + 1]]);
@@ -196,16 +279,32 @@ const smooth = (a, b, t) => {
 };
 
 function noise(x, y) {
-  return 46 * Math.sin(0.0117 * x + 1.3) * Math.cos(0.0089 * y - 0.7)
+  return 70 * Math.sin(0.0063 * x + 0.8) * Math.cos(0.0051 * y - 1.9)
+       + 46 * Math.sin(0.0117 * x + 1.3) * Math.cos(0.0089 * y - 0.7)
        + 24 * Math.sin(0.023 * x - 0.4) * Math.sin(0.019 * y + 1.1)
        + 12 * Math.sin(0.041 * x) * Math.cos(0.037 * y);
 }
 
+// Backdrop peaks: scenery-only crags framing the course. [x, y, summitZ, r] —
+// each is placed so its radius never reaches the course line or leaves the
+// terrain bounds.
+const PEAKS = [
+  [2000, -1500, 850, 1000],
+  [10000, 1200, 1350, 1250],
+  [-1600, 1400, 700, 950],
+  [5300, 4100, 1000, 1000],
+];
+
 function H(x, y) {
   const p = pathInfo(x, y);
   // open mountainside: sags below the course line, falls away laterally
-  const lat = Math.pow(Math.max(0, p.d - 192) / 1400, 2) * 800;
+  // into proper valleys (steeper and deeper than v2)
+  const lat = Math.pow(Math.max(0, p.d - 224) / 1500, 1.7) * 1500;
   let h = p.z - 300 - lat + noise(x, y);
+  for (const [px, py, pz, pr] of PEAKS) {
+    const d = Math.hypot(x - px, y - py);
+    if (d < pr) h = Math.max(h, BASE_Z + 64 + (pz - BASE_Z - 64) * Math.pow(1 - d / pr, 1.5) + 0.4 * noise(x, y));
+  }
   // plaza plateaus: flat, exactly at plaza height
   let w = 0, pz = 0;
   for (const pl of plazas) {
@@ -214,7 +313,10 @@ function H(x, y) {
     if (wi > w) { w = wi; pz = pl.z; }
   }
   h = h * (1 - w) + pz * w;
-  return Math.max(-240, Math.min(2000, h));
+  // rolling valley floor instead of a dead-flat clamp (offset noise so the
+  // floor undulation doesn't correlate with the mountainside)
+  const floor = BASE_Z + 64 + 0.4 * noise(x + 3000, y - 1700);
+  return Math.min(2000, Math.max(h, floor));
 }
 
 // grass (255) on flat ground, rock (0) on steep slopes
@@ -292,9 +394,18 @@ worldSolids.push(solid(TX0, TY0 - T, IZ1, TX1, TY0, IZ2, M.sky)); // south
 worldSolids.push(solid(TX0, TY1, IZ1, TX1, TY1 + T, IZ2, M.sky)); // north
 
 // ---------- course platforms ----------
+// Each platform extends down into the terrain below it (min height sampled
+// across the footprint) so nothing floats — pads become columns and spurs.
+function groundedBottom(cx, cy, hx, hy, top, minThick) {
+  let lo = Infinity;
+  for (const [dx, dy] of [[0, 0], [-hx, -hy], [hx, -hy], [-hx, hy], [hx, hy]])
+    lo = Math.min(lo, H(cx + dx, cy + dy));
+  return Math.min(top - minThick, Math.round(lo) - 64);
+}
 for (const p of platforms) {
-  const h = p.size / 2;
-  worldSolids.push(solid(p.cx - h, p.cy - h, p.top - p.thick, p.cx + h, p.cy + h, p.top,
+  const hx = p.sx / 2, hy = p.sy / 2;
+  const bot = groundedBottom(p.cx, p.cy, hx, hy, p.top, p.thick);
+  worldSolids.push(solid(p.cx - hx, p.cy - hy, bot, p.cx + hx, p.cy + hy, p.top,
     { top: p.topMat, all: p.sideMat }));
 }
 
@@ -307,6 +418,47 @@ worldSolids.push(solid(S.x + 128, S.y - 32, S.z + 160, S.x + 192, S.y + 32, S.z 
 // flag pole + flag
 worldSolids.push(solid(S.x + 156, S.y - 4, S.z + 208, S.x + 164, S.y + 4, S.z + 464, M.rockTop));
 worldSolids.push(solid(S.x + 164, S.y - 2, S.z + 400, S.x + 260, S.y + 2, S.z + 456, M.flag));
+
+// ---------- stage markers + scatter decor ----------
+// small cairn + marker flag tucked in a corner of each stage plaza
+for (let i = 1; i <= 3; i++) {
+  const pl = plazas[i];
+  const bx = pl.x + 208, by = pl.y + 208, bz = pl.z;
+  worldSolids.push(solid(bx - 48, by - 48, bz, bx + 48, by + 48, bz + 56, M.cliffA));
+  worldSolids.push(solid(bx - 28, by - 28, bz + 56, bx + 28, by + 28, bz + 96, M.cliffA));
+  worldSolids.push(solid(bx - 4, by - 4, bz + 96, bx + 4, by + 4, bz + 288, M.rockTop));
+  worldSolids.push(solid(bx + 4, by - 2, bz + 232, bx + 68, by + 2, bz + 280, M.flag));
+}
+
+// scattered boulders and rock spires, seeded so builds are reproducible.
+// Boulders stay 320u+ off the course line; tall spires 800u+ so nothing
+// pokes into a jump.
+let seed = 1337;
+const rand = () => {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+};
+const rrange = (a, b) => Math.round(a + (b - a) * rand());
+let placed = 0;
+for (let tries = 0; tries < 500 && placed < 46; tries++) {
+  const x = rrange(TX0 + 512, TX1 - 512), y = rrange(TY0 + 512, TY1 - 512);
+  const { d } = pathInfo(x, y);
+  const spire = placed % 6 === 5;
+  if (d < (spire ? 800 : 320) || d > 1900) continue;
+  const hz = Math.round(H(x, y));
+  if (hz < BASE_Z + 96) continue;
+  if (spire) {
+    const b = rrange(80, 160), h1 = rrange(220, 420);
+    worldSolids.push(solid(x - b, y - b, hz - 128, x + b, y + b, hz + h1, M.cliffA));
+    const b2 = Math.round(b * 0.6);
+    worldSolids.push(solid(x - b2, y - b2, hz + h1, x + b2, y + b2, hz + h1 + rrange(100, 220), M.cliffB));
+  } else {
+    const s = rrange(40, 110);
+    worldSolids.push(solid(x - s, y - s, hz - s, x + s, y + s, hz + rrange(s * 0.7, s * 1.3),
+      rand() < 0.5 ? M.cliffA : M.cliffB));
+  }
+  placed++;
+}
 
 // ---------- entities ----------
 const P = plazas;
@@ -397,3 +549,34 @@ cordon
 fs.writeFileSync(__dirname + "/kz_slop.vmf", vmf);
 console.log(`Wrote kz_slop.vmf: ${worldSolids.length} world solids, ${entities.length} entities, ${platforms.length} platforms`);
 console.log("Plazas:", plazas.map((p, i) => `S${i + 1 <= 4 ? i + 1 : "ummit"}(${p.x}, ${p.y}, z=${p.z})`).join("  "));
+console.log(`Terrain: x ${TX0}..${TX1}, y ${TY0}..${TY1} (${((TX1 - TX0) / TILE) * ((TY1 - TY0) / TILE)} tiles)`);
+console.log("\nJump difficulty report (need = avg air speed required):");
+for (const r of report) console.log("  " + r);
+
+// ---------- web viewer data (docs/mapdata.js) ----------
+// Heightfield + course boxes for the three.js viewer on GitHub Pages.
+const VSTEP = 64;
+const vnx = Math.round((TX1 - TX0) / VSTEP) + 1;
+const vny = Math.round((TY1 - TY0) / VSTEP) + 1;
+const heights = new Array(vnx * vny);
+for (let iy = 0; iy < vny; iy++)
+  for (let ix = 0; ix < vnx; ix++)
+    heights[iy * vnx + ix] = Math.round(H(TX0 + ix * VSTEP, TY0 + iy * VSTEP));
+
+const kind = (mat) => ({
+  [M.grassTop]: "grass", [M.dirtTop]: "dirt", [M.rockTop]: "rock",
+  [M.cliffA]: "cliffa", [M.cliffB]: "cliffb", [M.flag]: "flag",
+}[mat]);
+const viewerBoxes = boxRecords
+  .filter(([, , , , , , t, s]) => kind(t) || kind(s))
+  .map(([x1, y1, z1, x2, y2, z2, t, s]) => [x1, y1, z1, x2, y2, z2, kind(t) || kind(s), kind(s) || kind(t)]);
+
+const mapdata = {
+  step: VSTEP, x0: TX0, y0: TY0, nx: vnx, ny: vny, heights,
+  boxes: viewerBoxes,
+  plazas: plazas.map((p, i) => ({ ...p, name: i === 0 ? "Start" : i === plazas.length - 1 ? "Summit" : `Stage ${i + 1}` })),
+  zoneR: 288, zoneH: 160,
+};
+if (!fs.existsSync(__dirname + "/docs")) fs.mkdirSync(__dirname + "/docs");
+fs.writeFileSync(__dirname + "/docs/mapdata.js", "window.MAPDATA = " + JSON.stringify(mapdata) + ";\n");
+console.log(`\nWrote docs/mapdata.js: ${viewerBoxes.length} boxes, ${vnx}x${vny} heightfield`);

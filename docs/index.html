@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kz_slop — web viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  .hud { position: fixed; font-family: ui-monospace, Consolas, monospace; color: #dce3f0;
+         text-shadow: 0 1px 3px rgba(0,0,0,.8); user-select: none; pointer-events: none; }
+  #title { top: 14px; left: 16px; font-size: 15px; }
+  #title b { color: #ffd75e; }
+  #help { bottom: 14px; left: 16px; font-size: 12px; line-height: 1.6; opacity: .85; }
+  #stats { top: 14px; right: 16px; font-size: 13px; text-align: right; line-height: 1.7; }
+  #speed { font-size: 26px; font-weight: 700; }
+  #timer { font-size: 20px; color: #8fd18a; }
+  #mode { color: #ffd75e; }
+  #splits { top: 120px; right: 16px; font-size: 12px; text-align: right; line-height: 1.7; color: #a9b6cc; }
+  #msg { top: 42%; left: 0; right: 0; text-align: center; font-size: 22px; color: #ffd75e; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+           background: rgba(5,8,14,.55); cursor: pointer; }
+  #start .card { font-family: ui-monospace, Consolas, monospace; color: #dce3f0; background: rgba(10,14,22,.92);
+                 border: 1px solid #2a3448; border-radius: 12px; padding: 28px 34px; max-width: 560px;
+                 line-height: 1.75; font-size: 14px; }
+  #start h1 { margin: 0 0 10px; font-size: 22px; color: #ffd75e; }
+  #start .k { display: inline-block; background: #1c2434; border: 1px solid #33405a; border-radius: 4px;
+              padding: 0 7px; margin: 0 2px; font-size: 12px; }
+  #start .go { margin-top: 14px; color: #8fd18a; font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="hud" id="title"><b>kz_slop</b> — generated KZ mountain for Momentum Mod</div>
+<div class="hud" id="stats">
+  <div id="mode">FLY</div>
+  <div id="speed">0</div>
+  <div id="timer"></div>
+</div>
+<div class="hud" id="splits"></div>
+<div class="hud" id="help">
+  <span id="helptext"></span>
+</div>
+<div class="hud" id="msg"></div>
+<div id="start">
+  <div class="card">
+    <h1>kz_slop</h1>
+    An AI-generated KZ mountain ascent for Momentum Mod. Four stages: bhop foothills,
+    cliff climb, ridge pillars, longjump peak.<br><br>
+    <span class="k">click</span> lock mouse &nbsp; <span class="k">F</span> fly / play &nbsp;
+    <span class="k">WASD</span> move &nbsp; <span class="k">Space</span> jump (hold = auto-bhop) &nbsp;
+    <span class="k">R</span> restart &nbsp; <span class="k">1–5</span> go to stage<br>
+    Play mode has real-ish Source movement: 250 u/s run, air-strafing, 380 cap. Try to summit.
+    <div class="go">▶ click anywhere to start</div>
+  </div>
+</div>
+<script src="mapdata.js"></script>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+
+const D = window.MAPDATA;
+
+// ---------- coordinate mapping: Source (x,y,z-up) -> three (x, y-up, -z) ----------
+const toV3 = (x, y, z) => new THREE.Vector3(x, z, -y);
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.getElementById("app").appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9db8d6);
+scene.fog = new THREE.Fog(0x9db8d6, 3000, 16000);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 4, 40000);
+
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.4);
+sun.position.set(-2000, 3000, -1500);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xbcd0ee, 0x4a4438, 1.1));
+
+// ---------- terrain mesh (vertex-colored by slope, like the in-game blend) ----------
+const { step, x0, y0, nx, ny, heights } = D;
+const hAt = (ix, iy) => heights[Math.min(ny - 1, Math.max(0, iy)) * nx + Math.min(nx - 1, Math.max(0, ix))];
+
+{
+  const pos = new Float32Array(nx * ny * 3);
+  const col = new Float32Array(nx * ny * 3);
+  const grass = new THREE.Color(0x5a7a3a), rock = new THREE.Color(0x6f6a62),
+        snow = new THREE.Color(0xcfd4da), dark = new THREE.Color(0x4c5c33);
+  const c = new THREE.Color();
+  for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+    const i = iy * nx + ix, z = heights[i];
+    pos.set([x0 + ix * step, z, -(y0 + iy * step)], i * 3);
+    const gx = (hAt(ix + 1, iy) - hAt(ix - 1, iy)) / (2 * step);
+    const gy = (hAt(ix, iy + 1) - hAt(ix, iy - 1)) / (2 * step);
+    const g = Math.hypot(gx, gy);
+    const t = Math.min(1, Math.max(0, (g - 0.45) / 0.5)); // 0 grass, 1 rock
+    c.lerpColors(grass, dark, ((ix * 7 + iy * 13) % 17) / 34).lerp(rock, t);
+    if (z > 700) c.lerp(snow, Math.min(0.65, (z - 700) / 500) * (1 - t * 0.6));
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  const idx = [];
+  for (let iy = 0; iy < ny - 1; iy++) for (let ix = 0; ix < nx - 1; ix++) {
+    const a = iy * nx + ix, b = a + 1, e = a + nx, f = e + 1;
+    idx.push(a, b, e, b, f, e);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+}
+
+// ---------- course boxes ----------
+const KIND_COLORS = {
+  grass: 0x6b9040, dirt: 0x9a7d55, rock: 0x8d8880, cliffa: 0x6d6357, cliffb: 0x7b7468, flag: 0xd63c3c,
+};
+const mats = {};
+const matFor = (k) => (mats[k] ||= new THREE.MeshLambertMaterial({ color: KIND_COLORS[k] || 0x888888 }));
+for (const [x1, y1, z1, x2, y2, z2, topK, sideK] of D.boxes) {
+  const g = new THREE.BoxGeometry(x2 - x1, z2 - z1, y2 - y1);
+  const side = matFor(sideK), top = matFor(topK);
+  const mesh = new THREE.Mesh(g, [side, side, top, side, side, side]); // +x -x +y(top) -y +z -z
+  mesh.position.copy(toV3((x1 + x2) / 2, (y1 + y2) / 2, (z1 + z2) / 2));
+  scene.add(mesh);
+}
+
+// ---------- zones ----------
+const zones = D.plazas.map((p, i) => ({
+  ...p, i,
+  kind: i === 0 ? "start" : i === D.plazas.length - 1 ? "end" : "stage",
+}));
+for (const z of zones) {
+  const color = z.kind === "start" ? 0x35d05a : z.kind === "end" ? 0xffc93c : 0x3c8bd6;
+  const g = new THREE.BoxGeometry(D.zoneR * 2, D.zoneH, D.zoneR * 2);
+  const m = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.14, depthWrite: false });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.position.copy(toV3(z.x, z.y, z.z + D.zoneH / 2));
+  scene.add(mesh);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(g),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+  edges.position.copy(mesh.position);
+  scene.add(edges);
+}
+
+// ---------- movement / physics ----------
+const TICK = 1 / 128, GRAV = 800, VJUMP = Math.sqrt(2 * 800 * 57);
+const RUN = 250, ACCEL = 6.5, FRICTION = 4, AIRACCEL = 100, AIRCAP = 30, BHOP_CAP = 380;
+const PW = 16, PH = 72, EYE = 64; // half-width, height, eye level
+
+const spawnAt = (p) => ({ pos: [p.x, p.y, p.z + 1], vel: [0, 0, 0] });
+let player = spawnAt(D.plazas[0]);
+let yaw = 0, pitch = 0, mode = "fly", grounded = false;
+const keys = {};
+// console/debug helper: position the camera from devtools
+window.__cam = (x, y, z, yw = yaw, pt = pitch) => { player.pos = [x, y, z]; yaw = yw; pitch = pt; };
+window.__state = () => ({ pos: player.pos.slice(), vel: player.vel.slice(), mode, grounded });
+window.__floorAt = (x, y, z) => floorAt(x, y, z);
+// deterministic physics test: spawn at (x,y,z) in play mode, hold given keys
+// for `secs`, return final state
+window.__sim = (x, y, z, held, secs, yw = 0) => {
+  mode = "play"; yaw = yw;
+  player = { pos: [x, y, z], vel: [0, 0, 0] };
+  for (const k of Object.keys(keys)) delete keys[k];
+  for (const k of held) keys[k] = true;
+  for (let i = 0; i < Math.round(secs / TICK); i++) physTick(TICK);
+  for (const k of held) delete keys[k];
+  return window.__state();
+};
+
+// terrain height (bilinear) in source coords
+function terrainH(x, y) {
+  const fx = (x - x0) / step, fy = (y - y0) / step;
+  const ix = Math.floor(fx), iy = Math.floor(fy);
+  const tx = fx - ix, ty = fy - iy;
+  const h00 = hAt(ix, iy), h10 = hAt(ix + 1, iy), h01 = hAt(ix, iy + 1), h11 = hAt(ix + 1, iy + 1);
+  return h00 * (1 - tx) * (1 - ty) + h10 * tx * (1 - ty) + h01 * (1 - tx) * ty + h11 * tx * ty;
+}
+
+// floor under the player bbox: terrain corners + any box top we stand on
+function floorAt(x, y, z) {
+  let f = -1e9;
+  for (const [dx, dy] of [[-PW, -PW], [PW, -PW], [-PW, PW], [PW, PW], [0, 0]])
+    f = Math.max(f, terrainH(x + dx, y + dy));
+  for (const b of D.boxes) {
+    if (x + PW <= b[0] || x - PW >= b[3] || y + PW <= b[1] || y - PW >= b[4]) continue;
+    if (b[5] <= z + 4) f = Math.max(f, b[5]);
+  }
+  return f;
+}
+
+function collideBoxes(p, axis) {
+  for (const b of D.boxes) {
+    if (p.pos[0] + PW <= b[0] || p.pos[0] - PW >= b[3]) continue;
+    if (p.pos[1] + PW <= b[1] || p.pos[1] - PW >= b[4]) continue;
+    if (p.pos[2] + PH <= b[2] || p.pos[2] >= b[5]) continue;
+    // stepped onto a low top is handled by floor logic; here just push out
+    if (axis === 0) { p.pos[0] = p.vel[0] > 0 ? b[0] - PW : b[3] + PW; p.vel[0] = 0; }
+    if (axis === 1) { p.pos[1] = p.vel[1] > 0 ? b[1] - PW : b[4] + PW; p.vel[1] = 0; }
+    if (axis === 2) {
+      if (p.vel[2] <= 0) { p.pos[2] = b[5]; p.vel[2] = 0; }
+      else { p.pos[2] = b[2] - PH; p.vel[2] = 0; }
+    }
+  }
+}
+
+function accelerate(vel, wishX, wishY, wishSpeed, accel, dt) {
+  const cur = vel[0] * wishX + vel[1] * wishY;
+  const add = wishSpeed - cur;
+  if (add <= 0) return;
+  const speed = Math.min(accel * wishSpeed * dt, add);
+  vel[0] += wishX * speed; vel[1] += wishY * speed;
+}
+
+let timer = { state: "idle", t: 0, splits: [], seen: new Set() };
+const inZone = (z, p) =>
+  Math.abs(p.pos[0] - z.x) < D.zoneR && Math.abs(p.pos[1] - z.y) < D.zoneR &&
+  p.pos[2] >= z.z - 8 && p.pos[2] <= z.z + D.zoneH;
+
+function resetTimer() { timer = { state: "idle", t: 0, splits: [], seen: new Set() }; }
+const fmt = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(2).padStart(5, "0")}`;
+
+function physTick(dt) {
+  const sy = Math.sin(yaw), cy = Math.cos(yaw);
+  // source-coord wishdir from keys (forward = -three-z = +source... derived from yaw)
+  let fx = cy, fy = sy; // forward in source xy
+  let wx = 0, wy = 0;
+  if (keys["KeyW"]) { wx += fx; wy += fy; }
+  if (keys["KeyS"]) { wx -= fx; wy -= fy; }
+  if (keys["KeyA"]) { wx += -fy; wy += fx; }
+  if (keys["KeyD"]) { wx += fy; wy += -fx; }
+  const wl = Math.hypot(wx, wy);
+  if (wl > 0) { wx /= wl; wy /= wl; }
+
+  if (mode === "fly") {
+    const speed = keys["ShiftLeft"] ? 3000 : 900;
+    const up = (keys["Space"] ? 1 : 0) - (keys["ControlLeft"] || keys["KeyC"] ? 1 : 0);
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    player.pos[0] += (wx * cp) * speed * dt;
+    player.pos[1] += (wy * cp) * speed * dt;
+    player.pos[2] += (((keys["KeyW"] ? 1 : 0) - (keys["KeyS"] ? 1 : 0)) * sp + up) * speed * dt;
+    return;
+  }
+
+  const floor = floorAt(player.pos[0], player.pos[1], player.pos[2]);
+  grounded = player.pos[2] <= floor + 2 && player.vel[2] <= 0.01;
+
+  if (grounded) {
+    player.pos[2] = floor;
+    player.vel[2] = 0;
+    if (keys["Space"]) {
+      // takeoff: KZT-style speed cap, then jump
+      const hs = Math.hypot(player.vel[0], player.vel[1]);
+      if (hs > BHOP_CAP) { player.vel[0] *= BHOP_CAP / hs; player.vel[1] *= BHOP_CAP / hs; }
+      player.vel[2] = VJUMP;
+      grounded = false;
+    } else {
+      // friction
+      const hs = Math.hypot(player.vel[0], player.vel[1]);
+      if (hs > 0.1) {
+        const drop = Math.max(hs, 100) * FRICTION * dt;
+        const ns = Math.max(0, hs - drop) / hs;
+        player.vel[0] *= ns; player.vel[1] *= ns;
+      }
+      accelerate(player.vel, wx, wy, wl > 0 ? RUN : 0, ACCEL, dt);
+    }
+  }
+  if (!grounded) {
+    accelerate(player.vel, wx, wy, wl > 0 ? AIRCAP : 0, AIRACCEL, dt);
+    player.vel[2] -= GRAV * dt;
+  }
+
+  // integrate + collide, axis by axis
+  player.pos[0] += player.vel[0] * dt; collideBoxes(player, 0);
+  player.pos[1] += player.vel[1] * dt; collideBoxes(player, 1);
+  player.pos[2] += player.vel[2] * dt; collideBoxes(player, 2);
+
+  // terrain floor
+  const f2 = floorAt(player.pos[0], player.pos[1], player.pos[2]);
+  if (player.pos[2] < f2 && player.vel[2] <= 0) { player.pos[2] = f2; player.vel[2] = 0; }
+
+  // timer
+  const start = zones[0], end = zones[zones.length - 1];
+  if (inZone(start, player)) { timer.state = "armed"; timer.t = 0; timer.splits = []; timer.seen = new Set(); }
+  else if (timer.state === "armed") timer.state = "running";
+  if (timer.state === "running") {
+    timer.t += dt;
+    for (const z of zones) {
+      if (z.kind === "stage" && !timer.seen.has(z.i) && inZone(z, player)) {
+        timer.seen.add(z.i);
+        timer.splits.push(`${z.name}  ${fmt(timer.t)}`);
+      }
+    }
+    if (inZone(end, player)) {
+      timer.state = "done";
+      timer.splits.push(`Summit  ${fmt(timer.t)}`);
+      showMsg(`🏔 SUMMIT — ${fmt(timer.t)}`);
+    }
+  }
+}
+
+// ---------- input ----------
+const startEl = document.getElementById("start");
+const msgEl = document.getElementById("msg");
+let msgTimeout;
+function showMsg(s, ms = 3500) {
+  msgEl.textContent = s;
+  clearTimeout(msgTimeout);
+  msgTimeout = setTimeout(() => (msgEl.textContent = ""), ms);
+}
+
+startEl.addEventListener("click", () => {
+  startEl.style.display = "none";
+  renderer.domElement.requestPointerLock();
+});
+renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+addEventListener("mousemove", (e) => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw -= e.movementX * 0.0022;
+  pitch = Math.max(-1.55, Math.min(1.55, pitch - e.movementY * 0.0022));
+});
+addEventListener("keydown", (e) => {
+  keys[e.code] = true;
+  if (e.code === "Space") e.preventDefault();
+  if (e.code === "KeyF") {
+    mode = mode === "fly" ? "play" : "fly";
+    if (mode === "play") player.vel = [0, 0, 0];
+    showMsg(mode === "play" ? "PLAY — WASD + Space, hold Space to bhop" : "FLY — noclip");
+  }
+  if (e.code === "KeyR") { player = spawnAt(D.plazas[0]); resetTimer(); }
+  const n = parseInt(e.key);
+  if (n >= 1 && n <= D.plazas.length) { player = spawnAt(D.plazas[n - 1]); resetTimer(); }
+});
+addEventListener("keyup", (e) => (keys[e.code] = false));
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- main loop ----------
+const speedEl = document.getElementById("speed");
+const timerEl = document.getElementById("timer");
+const modeEl = document.getElementById("mode");
+const splitsEl = document.getElementById("splits");
+const helpEl = document.getElementById("helptext");
+helpEl.textContent = "click: lock mouse · F: fly/play · WASD move · Space jump (hold = bhop) · R restart · 1-5 stages · Shift: fly fast";
+
+// start camera looking at the mountain from the southwest
+player.pos = [D.plazas[0].x - 1600, D.plazas[0].y - 1600, D.plazas[0].z + 1400];
+yaw = Math.atan2(1600, 1600);
+pitch = -0.25;
+
+let acc = 0, last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  acc += Math.min(0.1, (now - last) / 1000);
+  last = now;
+  while (acc >= TICK) { physTick(TICK); acc -= TICK; }
+
+  camera.position.copy(toV3(player.pos[0], player.pos[1], player.pos[2] + (mode === "play" ? EYE : 0)));
+  camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw - Math.PI / 2, 0, "YXZ"));
+
+  const hs = Math.hypot(player.vel[0], player.vel[1]);
+  speedEl.textContent = mode === "play" ? `${hs.toFixed(0)} u/s` : "";
+  modeEl.textContent = mode.toUpperCase();
+  timerEl.textContent = timer.state === "running" ? fmt(timer.t)
+    : timer.state === "done" ? `✓ ${fmt(timer.t)}` : "";
+  splitsEl.innerHTML = timer.splits.join("<br>");
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
