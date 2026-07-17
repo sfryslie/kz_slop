@@ -1,38 +1,46 @@
 # kz_slop
 
-An AI-generated KZ bhop/platforming test map for [Momentum Mod](https://store.steampowered.com/app/669270/Momentum_Mod/). Pure slop, as requested.
+An AI-generated KZ mountain-ascent map for [Momentum Mod](https://store.steampowered.com/app/669270/Momentum_Mod/), with a working timer. Pure slop, as requested — now with geology.
 
-## What's in the map
+## The course
 
-A linear course inside a big skybox room:
+You climb a mountain, in four timed stages, from grassy foothills to a rocky peak with a cairn and a red flag:
 
-1. **Start pad** — spawn here
-2. **Bhop section** — 10 platforms with gaps growing from 96 to 176 units, zigzagging left/right
-3. **Rest pad**
-4. **Climb section** — 8 ledges rising 48 units each (jump/crouch-jump up)
-5. **High rest pad** (384 units up)
-6. **Longjump section** — 192-unit and 216-unit gaps
-7. **End pad** — red, with a red monolith so you know you made it
+| Stage | Section | What you do |
+|---|---|---|
+| 1 | **Foothills** (z 0→280) | 12-platform bhop, gaps growing 96→160 units, zigzagging |
+| 2 | **Cliffs** (z 280→700) | 8 ledges rising 48 units each up a rock face |
+| 3 | **Ridge** (z 700→1020) | 7 narrow rock pillars heading north, gaps 160→200 |
+| 4 | **Peak** (z 1020→1380) | Longjump finale: gaps 192→216, then a 220 to the summit |
 
-Falling off anywhere teleports you back to the start (the black floor is a giant `trigger_teleport`).
+Each stage has its own start zone with a restart point — fall onto the mountainside and use Momentum's *Restart Stage* bind to retry the current section. The terrain is real displacement geometry with rock/grass blending by slope; each stage plaza is a flat plateau guarded by cliffs.
+
+## How to play it (for Zee)
+
+1. Drop `kz_slop.bsp` into `Steam\steamapps\common\Momentum Mod Playtest\momentum\maps\`
+2. Drop `kz_slop.json` into `...\momentum\maps\zones\local\` (create the folder if needed) — this is the timer zone file
+3. Launch Momentum Mod, open console (`` ` ``), run `map kz_slop`
+4. The `kz_` prefix auto-selects KZ/Climb (KZT) movement; the timer starts when you leave the start zone
 
 ## How it's made
 
-- [generate_map.js](generate_map.js) — Node script that writes `kz_slop.vmf` (the Source engine map source format) entirely in code. No Hammer editor involved. Run `node generate_map.js` to regenerate.
-- The VMF is compiled to a playable `.bsp` using the compiler tools that ship with Momentum Mod itself:
+- [generate_map.js](generate_map.js) — Node script that generates the entire map source (`kz_slop.vmf`) in code: 240 displacement terrain tiles shaped around the course path, 32 platforms, timer zone entities. No Hammer editor involved. Run `node generate_map.js` to regenerate.
+- Compiled and zoned with the tools that ship with Momentum Mod itself:
 
 ```
 set MOM=C:\Program Files (x86)\Steam\steamapps\common\Momentum Mod Playtest
 "%MOM%\bin\win64\vbsp.exe" -game "%MOM%\momentum" kz_slop.vmf
 "%MOM%\bin\win64\vvis.exe" -game "%MOM%\momentum" kz_slop
 "%MOM%\bin\win64\vrad.exe" -game "%MOM%\momentum" kz_slop
+"%MOM%\bin\win64\zonemaker.exe" kz_slop.vmf     (writes kz_slop.json, the zone file)
 ```
 
-All textures/skybox used are ones Momentum Mod ships with (its bundled HL2 VPKs + `dev_nyro` set), so the single `kz_slop.bsp` file is fully self-contained — no extra assets needed.
+All textures (HL2 `nature/` set, `sky_cape_hill` skybox) come from content Momentum bundles for every player, so the map needs no extra assets.
 
-## How to play it (for Zee)
+### Notes for map generators
 
-1. Drop `kz_slop.bsp` into `Steam\steamapps\common\Momentum Mod Playtest\momentum\maps\`
-2. Launch Momentum Mod, open the console (`` ` ``), and run `map kz_slop`
-3. The `kz_` prefix makes Momentum use KZ/Climb movement automatically
-4. No timer zones are baked in — use Momentum's in-game zone editor to place a start zone on the first pad and an end zone on the red pad if you want times to count. Or just jump around.
+Two things that are easy to get wrong when writing VMFs in code:
+
+- Brush plane points must be **clockwise viewed from outside** the solid, or vbsp strips every face and crashes.
+- `zonemaker.exe` reads face vertices from the `vertices_plus` block (a Strata Hammer extension), not from plane intersections — zone brushes without it fail with "Could not find bottom of zone brush".
+- Displacement `dispinfo` rows advance along **+Y** from `startposition` (the min corner); columns within a row advance along **+X** (verified against `builddisp.cpp` in the Momentum engine source).
